@@ -9,17 +9,17 @@ import traceback
 
 app = FastAPI()
 
+# CORS 에러 완벽 해결 (allow_credentials를 False로 변경)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,  # <-- 이 부분을 반드시 True에서 False로 변경해야 합니다!
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 client = genai.Client()
 
-# 서버 깨우기용 주소 (여기로 신호를 보내 서버를 기상시킵니다)
 @app.get("/")
 async def health_check():
     return {"status": "awake"}
@@ -28,6 +28,7 @@ def calculate_stitch_count(image_bytes: bytes) -> int:
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
     
+    # 메모리 초과(OOM) 방지를 위해 이미지 크기 강제 축소
     max_width = 600
     height, width = img.shape
     if width > max_width:
@@ -74,5 +75,5 @@ async def estimate_embroidery(file: UploadFile = File(...)):
         return {"stitch_count": estimated_stitches, "expert_quote": response.text}
     except Exception as e:
         error_msg = traceback.format_exc()
-        print(error_msg) # Render 로그에 에러 상세 원인 기록
+        print(error_msg)
         return JSONResponse(status_code=500, content={"expert_quote": f"서버 오류: {str(e)}"})
