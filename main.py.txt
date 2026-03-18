@@ -8,7 +8,7 @@ from google.genai import types
 
 app = FastAPI()
 
-# CORS 설정 (프론트엔드 연동을 위함)
+# CORS 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,49 +16,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Gemini API 클라이언트 초기화 (환경 변수에 GEMINI_API_KEY 설정 필요)
 client = genai.Client()
 
 def calculate_stitch_count(image_bytes: bytes) -> int:
-    """OpenCV 거리 변환을 이용한 형태학적 침수 추정 알고리즘"""
-    # 이미지를 흑백으로 디코딩
+    """OpenCV 거리 변환을 이용한 형태학적 침수 추정 알고리즘 (메모리 최적화 적용)"""
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
     
-    # 이진화 처리 (배경 분리)
+    # ★ 메모리 초과(OOM) 방지를 위한 핵심 코드: 이미지 자동 축소
+    max_width = 600
+    height, width = img.shape
+    if width > max_width:
+        ratio = max_width / width
+        new_height = int(height * ratio)
+        img = cv2.resize(img, (max_width, new_height), interpolation=cv2.INTER_AREA)
+    
+    # 이진화 처리
     _, binary = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY_INV)
     
     # 유클리디안 거리 변환 적용
     dist_transform = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
     
-    # 얇은 선(새틴 스티치)과 넓은 면(다다미 필)을 구분하여 가중치 계산
     satin_pixels = np.sum((dist_transform > 0) & (dist_transform < 15))
     tatami_pixels = np.sum(dist_transform >= 15)
     
-    # 면적 대비 침수 계수 적용 (가상의 픽셀 대비 스티치 비율)
-    estimated_stitches = int((satin_pixels * 0.15) + (tatami_pixels * 0.25))
+    # 축소된 비율을 다시 보정하여 실제 침수 예측
+    scale_factor = (width / max_width)**2 if width > max_width else 1.0
+    estimated_stitches = int(((satin_pixels * 0.15) + (tatami_pixels * 0.25)) * scale_factor)
+    
     return estimated_stitches
 
 @app.post("/api/estimate")
 async def estimate_embroidery(file: UploadFile = File(...)):
     image_bytes = await file.read()
     
-    # 1. OpenCV를 통한 1차 물리적 침수 계산
+    # 1. 메모리 최적화된 OpenCV 침수 계산
     estimated_stitches = calculate_stitch_count(image_bytes)
     
-    # 2. Gemini API를 통한 지능형 복잡도 분석 및 최종 견적 산출
+    # 2. Gemini API 복잡도 분석
     prompt = f"""
     당신은 20년 경력의 디지털 자수 전문가입니다. 
     사용자가 업로드한 자수 도안 이미지를 분석하고, 시스템이 1차적으로 계산한 예상 침수({estimated_stitches}침)를 바탕으로 최종 견적을 내주세요.
     
     다음 형식으로 고객에게 제공할 견적서를 작성하세요:
-    1. 디자인 분석: (이미지 복잡도, 그라데이션 여부, 자수 난이도 등)
-    2. 추천 자수 기법: (새틴, 다다미, 3D 퍼프 등)
+    1. 디자인 분석: (이미지 복잡도, 자수 난이도 등)
+    2. 추천 자수 기법: (새틴, 다다미 등)
     3. 예상 침수: {estimated_stitches}침 (필요시 도안 난이도를 반영해 보정값 제안)
     4. 예상 단가: 1,000침당 $1.50 기준으로 계산된 총비용
     """
     
-    # Gemini 비전 모델 호출 (이미지 데이터와 프롬프트 동시 전달)
     response = client.models.generate_content(
         model='gemini-2.5-flash',
         contents=[
